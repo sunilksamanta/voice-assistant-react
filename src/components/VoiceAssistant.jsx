@@ -135,7 +135,7 @@ const VoiceAssistant = () => {
         formData.append('file', audioBlob, 'recording.wav');
 
         try {
-            const response = await axios.post('https://voiceagentapi.meancloud.in/', formData, {
+            const response = await axios.post('https://voiceagentapi.meancloud.in/process_audio/', formData, {
                 headers: { 'Content-Type': 'multipart/form-data' },
                 responseType: 'blob'
             });
