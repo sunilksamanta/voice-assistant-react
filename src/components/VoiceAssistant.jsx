@@ -1,102 +1,166 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Container, Button, Alert, Modal } from 'react-bootstrap';
+import { Container, Button, Alert } from 'react-bootstrap';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faMicrophone, faStop, faPlay, faPause, faPaperPlane } from '@fortawesome/free-solid-svg-icons';
 import axios from 'axios';
 import 'bootstrap/dist/css/bootstrap.min.css';
+import SpeakingFace from "./AnimatedSpeakingFace.jsx";
 
 const VoiceAssistant = () => {
     const [isRecording, setIsRecording] = useState(false);
     const [error, setError] = useState(null);
-    const [showPermissionModal, setShowPermissionModal] = useState(false);
-    const [permissionGranted, setPermissionGranted] = useState(false);
     const [audioUrl, setAudioUrl] = useState(null);
     const [isPlaying, setIsPlaying] = useState(false);
+    const [responseAudio, setResponseAudio] = useState(null);
+    const [isPlayingResponse, setIsPlayingResponse] = useState(false);
+    const [isPausedResponse, setIsPausedResponse] = useState(false);
     const mediaRecorder = useRef(null);
     const audioChunks = useRef([]);
     const streamRef = useRef(null);
     const audioRef = useRef(new Audio());
+    const responseAudioRef = useRef(new Audio());
+    const [apiLoading, setApiLoading] = useState(false);
 
-    const requestPermission = async () => {
-        setShowPermissionModal(true);
-    };
+    const startRecording = useCallback(async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            streamRef.current = stream;
+            audioChunks.current = [];
 
-    const handlePermissionResponse = async (granted) => {
-        setShowPermissionModal(false);
-        if (granted) {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                streamRef.current = stream;
-                setPermissionGranted(true);
-            } catch (err) {
-                setError("Failed to access the microphone. Please check your browser settings.");
-            }
-        } else {
-            setError("Microphone access is required to use the voice assistant.");
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const source = audioContext.createMediaStreamSource(stream);
+            const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+            const sampleRate = 16000;
+            let resampledBuffer = new Float32Array(0);
+
+            processor.onaudioprocess = (e) => {
+                const inputData = e.inputBuffer.getChannelData(0);
+                const ratio = audioContext.sampleRate / sampleRate;
+                const newLength = Math.round(inputData.length / ratio);
+                const result = new Float32Array(newLength);
+                let index = 0;
+                let inputIndex = 0;
+                while (index < result.length) {
+                    result[index] = inputData[Math.floor(inputIndex)];
+                    inputIndex += ratio;
+                    index++;
+                }
+                resampledBuffer = appendBuffer(resampledBuffer, result);
+            };
+
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+
+            const appendBuffer = (buffer1, buffer2) => {
+                const tmp = new Float32Array(buffer1.length + buffer2.length);
+                tmp.set(buffer1, 0);
+                tmp.set(buffer2, buffer1.length);
+                return tmp;
+            };
+
+            const encodeWAV = (samples) => {
+                const buffer = new ArrayBuffer(44 + samples.length * 2);
+                const view = new DataView(buffer);
+
+                const writeString = (view, offset, string) => {
+                    for (let i = 0; i < string.length; i++) {
+                        view.setUint8(offset + i, string.charCodeAt(i));
+                    }
+                };
+
+                // RIFF chunk descriptor
+                writeString(view, 0, 'RIFF');
+                view.setUint32(4, 36 + samples.length * 2, true);
+                writeString(view, 8, 'WAVE');
+
+                // FMT sub-chunk
+                writeString(view, 12, 'fmt ');
+                view.setUint32(16, 16, true);
+                view.setUint16(20, 1, true);
+                view.setUint16(22, 1, true);
+                view.setUint32(24, sampleRate, true);
+                view.setUint32(28, sampleRate * 2, true);
+                view.setUint16(32, 2, true);
+                view.setUint16(34, 16, true);
+
+                // Data sub-chunk
+                writeString(view, 36, 'data');
+                view.setUint32(40, samples.length * 2, true);
+
+                const volume = 1;
+                let index = 44;
+                for (let i = 0; i < samples.length; i++) {
+                    view.setInt16(index, samples[i] * (0x7FFF * volume), true);
+                    index += 2;
+                }
+
+                return view;
+            };
+
+            mediaRecorder.current = {
+                start: () => {},
+                stop: () => {
+                    source.disconnect();
+                    processor.disconnect();
+                    const wavData = encodeWAV(resampledBuffer);
+                    const audioBlob = new Blob([wavData], { type: 'audio/wav' });
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    setAudioUrl(audioUrl);
+                    setIsRecording(false);
+                }
+            };
+
+            mediaRecorder.current.start();
+            setIsRecording(true);
+            setError(null);
+            setAudioUrl(null);
+            setResponseAudio(null);
+        } catch (err) {
+            setError("Failed to access the microphone. Please check your browser settings.");
         }
-    };
-
-    const startRecording = useCallback(() => {
-        if (!streamRef.current) {
-            setError("No active audio stream. Please grant permission first.");
-            return;
-        }
-
-        audioChunks.current = [];
-        mediaRecorder.current = new MediaRecorder(streamRef.current);
-
-        mediaRecorder.current.ondataavailable = (event) => {
-            audioChunks.current.push(event.data);
-        };
-
-        mediaRecorder.current.onstop = () => {
-            const audioBlob = new Blob(audioChunks.current, { type: 'audio/wav' });
-            const audioUrl = URL.createObjectURL(audioBlob);
-            setAudioUrl(audioUrl);
-            setIsRecording(false);
-        };
-
-        mediaRecorder.current.start();
-        setIsRecording(true);
-        setError(null);
-        setAudioUrl(null); // Remove the previous audio when starting a new recording
     }, []);
 
-    const stopRecording = useCallback(() => {
-        if (mediaRecorder.current && isRecording) {
-            mediaRecorder.current.stop();
-        }
-    }, [isRecording]);
-
-    const sendAudioToAPI = async () => {
+    const sendAudioToAPI = useCallback(async () => {
+        setApiLoading(true);
         if (!audioUrl) {
             setError("No audio recorded. Please record audio before sending.");
+            setApiLoading(false);
             return;
         }
 
         const response = await fetch(audioUrl);
         const audioBlob = await response.blob();
         const formData = new FormData();
-        formData.append('audio', audioBlob, 'recording.wav');
+        formData.append('file', audioBlob, 'recording.wav');
 
         try {
-            const response = await axios.post('YOUR_API_ENDPOINT', formData, {
+            const response = await axios.post('http://localhost:8000/process_audio/', formData, {
                 headers: { 'Content-Type': 'multipart/form-data' },
+                responseType: 'blob'
             });
-            console.log('API response:', response.data);
-            // Handle the API response here
+            const responseAudioUrl = URL.createObjectURL(response.data);
+            setResponseAudio(responseAudioUrl);
+            playResponseAudio(responseAudioUrl);
         } catch (err) {
             setError("Failed to send audio to the API. Please try again.");
+        } finally {
+            setApiLoading(false);
         }
-    };
+    }, [audioUrl]);
+
+    const stopRecording = useCallback(() => {
+        if (mediaRecorder.current && isRecording) {
+            mediaRecorder.current.stop();
+            streamRef.current.getTracks().forEach(track => track.stop());
+        }
+    }, [isRecording]);
 
     const handleButtonClick = () => {
         if (isRecording) {
             stopRecording();
-        } else if (permissionGranted) {
-            startRecording();
         } else {
-            requestPermission();
+            startRecording();
         }
     };
 
@@ -109,12 +173,38 @@ const VoiceAssistant = () => {
         setIsPlaying(!isPlaying);
     };
 
+    const playResponseAudio = (audioUrl) => {
+        responseAudioRef.current.src = audioUrl;
+        responseAudioRef.current.play();
+        setIsPlayingResponse(true);
+        setIsPausedResponse(false);
+    };
+
+    const toggleResponsePlayPause = () => {
+        if (isPlayingResponse) {
+            responseAudioRef.current.pause();
+            setIsPlayingResponse(false);
+            setIsPausedResponse(true);
+        } else {
+            responseAudioRef.current.play();
+            setIsPlayingResponse(true);
+            setIsPausedResponse(false);
+        }
+    };
+
     useEffect(() => {
         if (audioUrl) {
             audioRef.current.src = audioUrl;
             audioRef.current.onended = () => setIsPlaying(false);
+            console.log(audioRef.current.src);
+            sendAudioToAPI();
         }
-    }, [audioUrl]);
+
+        responseAudioRef.current.onended = () => {
+            setIsPlayingResponse(false);
+            setIsPausedResponse(false);
+        };
+    }, [audioUrl, sendAudioToAPI]);
 
     return (
         <Container className="d-flex flex-column align-items-center justify-content-center vh-100 bg-dark text-light">
@@ -126,6 +216,7 @@ const VoiceAssistant = () => {
                     size="lg"
                     className="rounded-circle p-4 mb-3 main-button"
                     onClick={handleButtonClick}
+                    disabled={isPlayingResponse}
                 >
                     <FontAwesomeIcon
                         icon={isRecording ? faStop : faMicrophone}
@@ -139,6 +230,19 @@ const VoiceAssistant = () => {
                         <div className="wave"></div>
                         <div className="wave"></div>
                     </div>
+                )}
+
+                {apiLoading && (
+                    <div className="wave-container">
+                        <div className="wave"></div>
+                        <div className="wave"></div>
+                        <div className="wave"></div>
+                    </div>
+                )}
+                {!apiLoading && (
+                    <p className="mt-4">
+                        {isRecording ? "Listening... Click to stop" : "Click to start speaking"}
+                    </p>
                 )}
                 {audioUrl && !isRecording && (
                     <div className="mt-4 d-flex justify-content-center align-items-center">
@@ -159,27 +263,43 @@ const VoiceAssistant = () => {
                         </Button>
                     </div>
                 )}
-            </div>
-            <p className="mt-4">
-                {isRecording ? "Listening... Click to stop" : "Click to start speaking"}
-            </p>
 
-            <Modal show={showPermissionModal} onHide={() => setShowPermissionModal(false)} centered>
-                <Modal.Header closeButton>
-                    <Modal.Title>Microphone Permission</Modal.Title>
-                </Modal.Header>
-                <Modal.Body>
-                    <p>This app needs access to your microphone to record audio. Do you want to allow microphone access?</p>
-                </Modal.Body>
-                <Modal.Footer>
-                    <Button variant="secondary" onClick={() => handlePermissionResponse(false)}>
-                        Deny
-                    </Button>
-                    <Button variant="primary" onClick={() => handlePermissionResponse(true)}>
-                        Allow
-                    </Button>
-                </Modal.Footer>
-            </Modal>
+
+            </div>
+
+
+            {apiLoading && (<p className="mt-4">Thinking...</p>)}
+
+            {(isPlayingResponse || isPausedResponse) && (
+                <>
+                    <SpeakingFace isRunning={isPlayingResponse} />
+                    <div className="mt-4 d-flex flex-column align-items-center">
+                        <Button
+                            variant="outline-light"
+                            className="rounded-circle play-button mb-2"
+                            onClick={toggleResponsePlayPause}
+                        >
+                            <FontAwesomeIcon icon={isPlayingResponse ? faPause : faPlay} size="2x" />
+                        </Button>
+                        <span className="play-text">
+                            {isPlayingResponse ? "Pause Response" : "Resume Response"}
+                        </span>
+                        {/*{isPlayingResponse && (*/}
+                        {/*    // <div className="mt-2 playing-animation">*/}
+                        {/*    //     <div className="bar"></div>*/}
+                        {/*    //     <div className="bar"></div>*/}
+                        {/*    //     <div className="bar"></div>*/}
+                        {/*    //     <div className="bar"></div>*/}
+                        {/*    //     <div className="bar"></div>*/}
+                        {/*    // </div>*/}
+                        {/*    */}
+                        {/*)}*/}
+
+                    </div>
+                </>
+
+            )}
+
         </Container>
     );
 };
